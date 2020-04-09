@@ -244,23 +244,23 @@ function main(credentials) {
                   return previousUpload.then(() => {
                     const fileToUpload = path.join(extractionDir, nextFile)
                     return uploadDocument(connection, fileToUpload)
-                .then(versionRecord => {
+                      .then(versionRecord => {
                         uploadedFiles.push(versionRecord.id)
-                  return createDocumentLinkRecords(
-                    connection,
-                    state.userId,
-                    record.Id,
-                    versionRecord.id,
-                  )
-                })
-            })
+                        return createDocumentLinkRecords(
+                          connection,
+                          state.userId,
+                          record.Id,
+                          versionRecord.id,
+                        )
+                      })
+                  })
                 },
                 new Promise(resolve => resolve()),
               )
               .catch(error => {
                 error.uploadedFiles = uploadedFiles
                 throw error
-          })
+              })
           })
           .then(() => {
             return connection.update(
@@ -270,11 +270,11 @@ function main(credentials) {
                 Title: `backup_${record.Title}`,
               },
             )
-      })
+          })
           .catch(error => {
             fs.appendFileSync(logNames.uploadErrors, `${record.Id}: ${error}\n`)
             return deleteUploadedFiles(connection, error.uploadedFiles)
-    })
+          })
       })
     })
 }
@@ -307,6 +307,61 @@ function justDonwloadAndConvert(credentials) {
     })
 }
 
+function undoMyWork(credentials) {
+  const connection = new jsforce.Connection({
+    loginUrl: credentials.url,
+  })
+  connection.login(credentials.user, credentials.pw + credentials.token)
+    .then(() => {
+      return connection.queryAll(oneLine`
+        SELECT ContentDocumentId, ContentDocument.Title
+        FROM ContentDocumentLink
+        WHERE LinkedEntityId = '0063O0000056Qu5QAE' AND ContentDocument.FileExtension != 'msg'
+      `)
+    })
+    .then(result => {
+      return result.records
+    })
+    .then(records => {
+      const ids = records.map(record => {
+        return record.ContentDocumentId
+      })
+      return connection.destroy('ContentDocument', ids)
+    })
+    .then(result => {
+      console.log(result)
+    })
+    .catch(error => {
+      console.error(error)
+    })
+    .then(() => {
+      return connection.queryAll(oneLine`
+        SELECT ContentDocumentId, ContentDocument.Title
+        FROM ContentDocumentLink
+        WHERE LinkedEntityId = '0063O0000056Qu5QAE' AND ContentDocument.FileExtension = 'msg'
+      `)
+    })
+    .then(result => {
+      return result.records
+    })
+    .then(records => {
+      const updates = records
+        .filter(record => {
+          return record.ContentDocument.Title.startsWith('backup_')
+        })
+        .map(record => {
+          return {Id: record.ContentDocumentId, Title: record.ContentDocument.Title.slice(7)}
+        })
+      return connection.update('ContentDocument', updates)
+    })
+    .then(result => {
+      console.log(result)
+    })
+    .catch(error => {
+      console.error(error)
+    })
+}
 
-justDonwloadAndConvert(loginData)
-// main(sandboxData)
+// justDonwloadAndConvert(loginData)
+// undoMyWork(sandboxData)
+main(sandboxData)
