@@ -54,16 +54,16 @@ function uploadDocument(connection, localFilename) {
     Description: '',
     VersionData: file.toString('base64'),
   }
-  headers = {
+  const headers = {
     'Authorization': 'Bearer ' + connection.accessToken,
     'Content-Type': 'application/json',
   }
-  options = {
+  const options = {
     method: 'POST',
     headers: headers,
     body: JSON.stringify(record),
   }
-  uploadPath = `/services/data/v${connection.version}/sobjects/ContentVersion/`
+  const uploadPath = `/services/data/v${connection.version}/sobjects/ContentVersion/`
   return fetch(connection.instanceUrl + uploadPath, options)
     .then(response => response.json())
 }
