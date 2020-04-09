@@ -14,6 +14,7 @@ const logNames = {
   requestErrors: `requestErrors.txt`,
   convertErrors: 'convertErros.txt',
   fetchErrors: 'fetchErrors.txt',
+  uploadErrors: 'uploadErrors.txt'
 }
 
 function downloadDocument(connection, serverFilename, localFilename) {
@@ -191,6 +192,22 @@ function extractMsgFile(localFilename) {
   })
 }
 
+function deleteUploadedFiles(connection, versionDataIds) {
+  versionDataIds.map(versionDataId => {
+    connection.queryAll(oneLine`
+      SELECT ContentDocumentId
+      FRON ContentVersion
+      WHERE Id = '${versionDataId}'
+    `)
+      .then(result => {
+        return result.records[0]
+      })
+      .then(record => {
+        connection.sobject['ContentDocument'].del(record)
+      })
+  })
+}
+
 function main(credentials) {
 
   const connection = new jsforce.Connection({
@@ -220,10 +237,15 @@ function main(credentials) {
             return extractMsgFile(localFilename)
           })
           .then(() => {
-            fs.readdirSync(extractionDir).map(filename => {
-              const fileToUpload = path.join(extractionDir, filename)
-              uploadDocument(connection, fileToUpload)
+            const uploadedFiles = []
+            return fs.readdirSync(extractionDir)
+              .reduce(
+                (previousUpload, nextFile) =>{
+                  return previousUpload.then(() => {
+                    const fileToUpload = path.join(extractionDir, nextFile)
+                    return uploadDocument(connection, fileToUpload)
                 .then(versionRecord => {
+                        uploadedFiles.push(versionRecord.id)
                   return createDocumentLinkRecords(
                     connection,
                     state.userId,
@@ -232,6 +254,13 @@ function main(credentials) {
                   )
                 })
             })
+                },
+                new Promise(resolve => resolve()),
+              )
+              .catch(error => {
+                error.uploadedFiles = uploadedFiles
+                throw error
+          })
           })
           .then(() => {
             return connection.update(
@@ -241,6 +270,11 @@ function main(credentials) {
                 Title: `backup_${record.Title}`,
               },
             )
+      })
+          .catch(error => {
+            fs.appendFileSync(logNames.uploadErrors, `${record.Id}: ${error}\n`)
+            return deleteUploadedFiles(connection, error.uploadedFiles)
+    })
       })
     })
 }
