@@ -151,7 +151,9 @@ function getMsgFiles (connection, state) {
           Querying msg files returns a empty set of records.
         `)
       }
-      state.msgRecords = result.records.filter(versionDataExists)
+      state.msgRecords = result.records
+        .filter(versionDataExists)
+        .filter(notABackup)
       return state
     })
 }
@@ -168,6 +170,10 @@ function versionDataExists(record) {
     return false
   }
   return true
+}
+
+function notABackup(record) {
+  return !record.Title.startsWith('backup_')
 }
 
 function extractMsgFile(localFilename) {
@@ -227,6 +233,14 @@ function main(credentials) {
                 })
             })
           })
+          .then(() => {
+            return connection.update(
+              'ContentDocument',
+              {
+                Id: record.Id,
+                Title: `backup_${record.Title}`,
+              },
+            )
       })
     })
 }
