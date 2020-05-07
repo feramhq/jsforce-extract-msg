@@ -4,20 +4,27 @@ const fs = require('fs')
 const fetch = require("node-fetch")
 const msg2txt = require('msg2txt')
 const path = require('path')
-const pw = require('./pw')
 
-const loginData = pw.loginData
-const sandboxData = pw.sandboxData
+module.exports = {
+  main,
+  undoMyWork,
+}
 
 const logNames = {
   missingVersionData: `missingVersionData.txt`,
   requestErrors: `requestErrors.txt`,
   convertErrors: 'convertErros.txt',
   fetchErrors: 'fetchErrors.txt',
-  uploadErrors: 'uploadErrors.txt'
+  uploadErrors: 'uploadErrors.txt',
+  createLinkErrors: 'createLinkErrors.txt',
 }
+Object.entries(logNames).map(([key, value]) => {
+  logNames[key] = './logs/' + value
+})
 
-function downloadDocument(connection, serverFilename, localFilename) {
+const filedir = './files'
+
+async function downloadDocument(connection, serverFilename, localFilename) {
   const headers = {
     'Authorization': 'Bearer ' + connection.accessToken,
     'Content-Type': 'application/octet-stream',
@@ -27,32 +34,34 @@ function downloadDocument(connection, serverFilename, localFilename) {
     headers: headers,
   }
   return new Promise((resolve, reject) => {
-    fetch(connection.instanceUrl + serverFilename, options)
-      .then(result => {
-        if (!result.body) {
-          throw new Error(oneLine`
-            The request body of the document ${localFilename} was empty
-          `)
-        }
-        result.body.pipe(fs.createWriteStream(localFilename))
+      fetch(connection.instanceUrl + serverFilename, options)
+        .then(result => {
+          if (!result.ok) {
+            reject(new Error(result.statusText))
+          }
+          result.body.pipe(fs.createWriteStream(localFilename))
           .on('close', () => resolve())
-      })
-      .catch(error => {
-        fs.appendFileSync(
-          logNames.fetchErrors,
-          `${localFilename} - ${document.Title}: ${error}\n`
-        )
-        reject(error)
-      })
-  })
+        })
+        .catch(error => {
+          reject(error)
+        })
+    })
+    .catch(error => {
+      fs.appendFileSync(
+        logNames.fetchErrors,
+        `${localFilename}: ${error}\n`,
+      )
+      throw error
+    })
 }
 
-function uploadDocument(connection, localFilename) {
+async function uploadDocument(connection, localFilename) {
+
   const file = fs.readFileSync(localFilename)
-  const record = {
-    PathOnClient: localFilename,
+  const versionRecord = {
     Title: path.basename(localFilename, path.extname(localFilename)),
     Description: '',
+    PathOnClient: localFilename,
     VersionData: file.toString('base64'),
   }
   const headers = {
@@ -62,77 +71,80 @@ function uploadDocument(connection, localFilename) {
   const options = {
     method: 'POST',
     headers: headers,
-    body: JSON.stringify(record),
+    body: JSON.stringify(versionRecord),
   }
   const uploadPath = `/services/data/v${connection.version}/sobjects/ContentVersion/`
-  return fetch(connection.instanceUrl + uploadPath, options)
-    .then(response => response.json())
+
+  return await fetch(connection.instanceUrl + uploadPath, options)
+    .then(result => {
+      if (!result.ok) {
+        throw result.statusText
+      }
+      return result.json()
+    })
+    .then(result => {
+      return result.id
+    })
+    .catch(error => {
+      fs.appendFileSync(
+        logNames.uploadErrors,
+        `${localFilename}: ${JSON.stringify(error)}\n`
+      )
+      throw error
+    })
 }
 
-function createDocumentLinkRecords(
+async function createDocumentLinkRecords(
   connection,
   currentUserId,
   msgFileId,
   newVersionRecordId,
 ) {
-  return connection.queryAll(oneLine`
+  const linksQuery = oneLine`
     SELECT LinkedEntityId, ShareType, Visibility
     FROM ContentDocumentLink
     WHERE ContentDocumentId = '${msgFileId}'
-  `)
-    .then( queryResult => {
-      const linkRecords = queryResult.records
-      return connection.queryAll(oneLine`
-        SELECT ContentDocumentId
-        FROM ContentVersion
-        WHERE Id = '${newVersionRecordId}'
-      `)
-        .then(result => {
-          if (
-            !result ||
-            !result.records ||
-            !result.records.length ||
-            !result.records[0].ContentDocumentId
-          ) {
-            throw new Error(
-              `Could not query DocumentLinks of the uploaded file
-                ${newVersionRecordId}`,
-            )
-          }
-          const newDocumentId = result.records[0].ContentDocumentId
-          uploadPath = oneLineTrim`
-            /services/data/v${connection.version}/
-            sobjects/ContentDocumentLink/
-          `
-          linkRecords
-            .filter(linkRecord => {
-              return currentUserId !== linkRecord.LinkedEntityId
-            })
-            .map(linkRecord => {
-              const record = {
-                ContentDocumentId: newDocumentId,
-                LinkedEntityId: linkRecord.LinkedEntityId,
-                ShareType: linkRecord.ShareType,
-                Visibility: linkRecord.Visibility,
-              }
+  `
+  const documentIdQuery = oneLine`
+    SELECT ContentDocumentId
+    FROM ContentVersion
+    WHERE Id = '${newVersionRecordId}'
+  `
+  try{
+    const documentId = await connection.queryAll(documentIdQuery)
+      .then(result => result.records[0].ContentDocumentId)
+    const records = await connection.queryAll(linksQuery)
+      .then(result => result.records)
+    const newLinkRecords = records
+      .filter(record => {
+        return currentUserId !== record.LinkedEntityId
+      })
+      .map(record => {
+        return {
+          ContentDocumentId: documentId,
+          LinkedEntityId: record.LinkedEntityId,
+          ShareType: record.ShareType,
+          Visibility: record.Visibility,
+        }
+      })
 
-              connection.create('ContentDocumentLink', record)
-                .catch(createLinkError => {
-                  throw createLinkError
-                })
-            })
-        })
-        .catch(getNewDocumentIdError => {
-          throw getNewDocumentIdError
-        })
-    })
-    .catch(getAllDocumentLinksError => {
-      throw getAllDocumentLinksError
-    })
+    await connection.create('ContentDocumentLink', newLinkRecords)
+  }
+  catch(error) {
+    fs.appendFileSync(
+      logNames.createLinkErrors,
+      oneLine`
+        msgId: ${msgFileId},
+        VersionId: ${newVersionRecordId},
+        error: ${JSON.stringify(error, null, 2)}\n
+      `
+    )
+    throw error
+  }
 }
 
-function getMsgFiles (connection, state) {
-  return connection.queryAll(oneLine`
+async function getMsgFiles (connection, fileLimit) {
+  let query = oneLine`
     SELECT
       Id,
       Title,
@@ -140,22 +152,18 @@ function getMsgFiles (connection, state) {
       LatestPublishedVersion.VersionData,
       LatestPublishedVersion.Id
     FROM ContentDocument
-    WHERE FileExtension = 'msg'
-  `)
+    WHERE
+      FileExtension = 'msg' AND
+      (NOT Title LIKE 'backup_%')
+    `
+  if (!fileLimit === false) {
+    query += ' LIMIT 30'
+  }
+  return await connection.queryAll(query)
     .then(result => {
-      if (
-        !result ||
-        !result.records ||
-        !result.records.length
-      ) {
-        throw new Error(oneLine`
-          Querying msg files returns a empty set of records.
-        `)
-      }
-      state.msgRecords = result.records
+      return result.records
         .filter(versionDataExists)
         .filter(notABackup)
-      return state
     })
 }
 
@@ -178,190 +186,227 @@ function notABackup(record) {
 }
 
 function extractMsgFile(localFilename) {
-  return new Promise((resolve, reject) => {
-    try {
-      msg2txt(localFilename)
-      resolve()
-    }
-    catch (error) {
-      fs.appendFileSync(
-        logNames.convertErrors,
-        `${localFilename}: ${error}\n`,
-      )
-    }
-  })
+  try {
+    msg2txt(localFilename)
+  }
+  catch (error) {
+    fs.appendFileSync(
+      logNames.convertErrors,
+      `${localFilename}: ${error}\n`,
+    )
+    throw error
+  }
 }
 
-function deleteUploadedFiles(connection, versionDataIds) {
-  versionDataIds.map(versionDataId => {
-    connection.queryAll(oneLine`
-      SELECT ContentDocumentId
-      FRON ContentVersion
-      WHERE Id = '${versionDataId}'
-    `)
-      .then(result => {
-        return result.records[0]
-      })
-      .then(record => {
-        connection.sobject['ContentDocument'].del(record)
-      })
-  })
-}
-
-function main(credentials) {
-
-  const connection = new jsforce.Connection({
-    loginUrl: credentials.url,
-  })
-
-  Object.entries(logNames).map(([key, value]) => {
-    fs.unlink(value, () => {})
-  })
-
-  connection
-    .login(credentials.user, credentials.pw + credentials.token)
-    .then(async loginInformation => {
-      const state = {userId: loginInformation.id}
-      return state
-    })
-    .then(state => {
-      return getMsgFiles(connection, state)
-    })
-    .then(state => {
-      state.msgRecords.map(record => {
-        const localFilename = `./files/${record.Id}.${record.FileExtension}`
-        const serverFilename = record.LatestPublishedVersion.VersionData
-        const extractionDir = `./files/${record.Id}`
-        downloadDocument(connection, serverFilename, localFilename)
-          .then(() => {
-            return extractMsgFile(localFilename)
-          })
-          .then(() => {
-            const uploadedFiles = []
-            return fs.readdirSync(extractionDir)
-              .reduce(
-                (previousUpload, nextFile) =>{
-                  return previousUpload.then(() => {
-                    const fileToUpload = path.join(extractionDir, nextFile)
-                    return uploadDocument(connection, fileToUpload)
-                      .then(versionRecord => {
-                        uploadedFiles.push(versionRecord.id)
-                        return createDocumentLinkRecords(
-                          connection,
-                          state.userId,
-                          record.Id,
-                          versionRecord.id,
-                        )
-                      })
-                  })
-                },
-                new Promise(resolve => resolve()),
-              )
-              .catch(error => {
-                error.uploadedFiles = uploadedFiles
-                throw error
-              })
-          })
-          .then(() => {
-            return connection.update(
-              'ContentDocument',
-              {
-                Id: record.Id,
-                Title: `backup_${record.Title}`,
-              },
-            )
-          })
-          .catch(error => {
-            fs.appendFileSync(logNames.uploadErrors, `${record.Id}: ${error}\n`)
-            return deleteUploadedFiles(connection, error.uploadedFiles)
-          })
-      })
-    })
-}
-
-function justDonwloadAndConvert(credentials) {
-  const connection = new jsforce.Connection({
-    loginUrl: credentials.url,
-  })
-
-  Object.entries(logNames).map(([key, value]) => {
-    fs.unlink(value, () => {})
-  })
-
-  connection
-    .login(credentials.user, credentials.pw + credentials.token)
-    .then(async loginInformation => {
-      const state = {userId: loginInformation.id}
-      return state
-    })
-    .then(state => {
-      return getMsgFiles(connection, state)
-    })
-    .then(state => {
-      state.msgRecords.map(record => {
-        const localFilename = `./files/${record.Id}.${record.FileExtension}`
-        const serverFilename = record.LatestPublishedVersion.VersionData
-        downloadDocument(connection, serverFilename, localFilename)
-          .then(() => extractMsgFile(localFilename))
-      })
-    })
-}
-
-function undoMyWork(credentials) {
-  const connection = new jsforce.Connection({
-    loginUrl: credentials.url,
-  })
-  connection.login(credentials.user, credentials.pw + credentials.token)
-    .then(() => {
-      return connection.queryAll(oneLine`
-        SELECT ContentDocumentId, ContentDocument.Title
-        FROM ContentDocumentLink
-        WHERE LinkedEntityId = '0063O0000056Qu5QAE' AND ContentDocument.FileExtension != 'msg'
-      `)
-    })
+async function deleteExtractedDocuments(connection, msgDocumentId) {
+  const query = oneLine`
+    SELECT ContentDocumentId
+    FROM ContentDocumentLink
+    WHERE LinkedEntityId = '${msgDocumentId}'
+  `
+  const ids = await connection.queryAll(query)
     .then(result => {
-      return result.records
-    })
-    .then(records => {
-      const ids = records.map(record => {
+      return result.records.map(record => {
         return record.ContentDocumentId
       })
-      return connection.destroy('ContentDocument', ids)
     })
+  console.log(ids)
+}
+
+async function getDocumentsWithVersionIds(connection, versionIds) {
+  const query = oneLine`
+    SELECT ContentDocumentId
+    FROM ContentVersion
+    WHERE Id IN ${toSOQLList(versionIds)}
+  `
+  return connection.queryAll(query)
     .then(result => {
-      console.log(result)
+      return result.records.map(value => {
+        return value.ContentDocumentId
+      })
     })
-    .catch(error => {
-      console.error(error)
-    })
-    .then(() => {
-      return connection.queryAll(oneLine`
-        SELECT ContentDocumentId, ContentDocument.Title
-        FROM ContentDocumentLink
-        WHERE LinkedEntityId = '0063O0000056Qu5QAE' AND ContentDocument.FileExtension = 'msg'
-      `)
-    })
+
+}
+
+async function deleteDocumentsWithVersionIds(connection, versionIds) {
+  const documentIds = await getDocumentsWithVersionIds(connection, versionIds)
+
+  await connection.destroy('ContentDocument', documentIds)
+}
+
+function toSOQLList(list) {
+  return "('" + list.join("', '") + "')"
+}
+
+async function revertAllExtractions(connection) {
+}
+
+async function main(credentials, fileLimit) {
+
+  if (!fileLimit === false) {
+    fileLimit = true
+  }
+
+  const connection = new jsforce.Connection({
+    loginUrl: credentials.url,
+  })
+
+  Object.entries(logNames).map(([key, value]) => {
+    fs.unlink(value, () => {})
+  })
+
+  fs.rmdirSync(filedir, {recursive: true})
+  fs.mkdirSync(filedir)
+
+  const userId = await connection
+    .login(credentials.user, credentials.pw + credentials.token)
+    .then(loginInformation => loginInformation.id)
+
+  const msgFileRecords = await getMsgFiles(connection, fileLimit)
+  if (msgFileRecords.length === 0) {
+    console.info('There are no msg files to extract.')
+    return
+  }
+  for (let msgFileRecord of msgFileRecords) {
+    const localFilename = oneLineTrim`
+      ${filedir}/${msgFileRecord.Id}
+      .${msgFileRecord.FileExtension}
+    `
+    const serverFilename = msgFileRecord.LatestPublishedVersion.VersionData
+    const extractionDir = `${filedir}/${msgFileRecord.Id}`
+    try {
+      console.info(`downloading ${msgFileRecord.Id}`)
+      await downloadDocument(connection, serverFilename, localFilename)
+      console.info(`extracting ${msgFileRecord.Id}`)
+      await extractMsgFile(localFilename)
+    }
+    catch(error) {
+      continue
+    }
+    const uploadedVersionIds = []
+    try{
+      for (const i of fs.readdirSync(extractionDir)) {
+        const newFilename = extractionDir + `/${i}`
+        console.info(`>>> uploading ${newFilename}`)
+        const newVersionId = await uploadDocument(connection, newFilename)
+        uploadedVersionIds.push(newVersionId)
+        console.info(`>>> create Links for ${newFilename}`)
+        await createDocumentLinkRecords(connection, userId, msgFileRecord.Id, newVersionId)
+      }
+      console.info(`updating ${msgFileRecord.Id}`)
+      const description = JSON.stringify(await getDocumentsWithVersionIds(
+          connection,
+          uploadedVersionIds,
+        ))
+
+      await connection.update(
+        'ContentDocument',
+        {
+          Id: msgFileRecord.Id,
+          Title: 'backup_' + msgFileRecord.Title,
+          Description: description
+        }
+      )
+    }
+    catch(error) {
+      console.info('!!! error while creating documents')
+      if (uploadedVersionIds.length > 0) {
+        try{
+          await deleteDocumentsWithVersionIds(connection, uploadedVersionIds)
+          console.info('!!! cleaned up everything!')
+        }
+        catch(error) {
+          console.info(oneLine`
+            Major Error! Couldn't clean up after error while uploading Files!
+          `)
+          throw error
+        }
+      }
+    }
+    finally {
+      console.info('\n')
+    }
+  }
+
+  //--------------------------------------------------------------------------//
+}
+
+async function undoMyWork(credentials) {
+
+  const connection = new jsforce.Connection({
+    loginUrl: credentials.url,
+  })
+
+  Object.entries(logNames).map(([_, value]) => {
+    fs.unlink(value, () => {})
+  })
+
+  await connection.login(credentials.user, credentials.pw + credentials.token)
+  const msgFilesQuery = oneLine`
+    SELECT Id, Title, Description
+    FROM ContentDocument
+    WHERE FileExtension = 'msg' AND
+      Title LIKE 'backup_%'
+  `
+  const records = await connection.queryAll(msgFilesQuery)
     .then(result => {
       return result.records
     })
-    .then(records => {
-      const updates = records
-        .filter(record => {
-          return record.ContentDocument.Title.startsWith('backup_')
-        })
-        .map(record => {
-          return {Id: record.ContentDocumentId, Title: record.ContentDocument.Title.slice(7)}
-        })
-      return connection.update('ContentDocument', updates)
-    })
-    .then(result => {
-      console.log(result)
-    })
-    .catch(error => {
+  for (let record of records) {
+    try{
+      const filesToDelete = JSON.parse(record.Description)
+      connection.destroy('ContentDocument', filesToDelete)
+      await connection.update(
+        'ContentDocument',
+        {
+          Id: record.Id,
+          Title: record.Title.slice(7),
+          Description: '',
+        }
+      )
+    }
+    catch(error) {
       console.error(error)
-    })
+      continue
+    }
+  }
+
 }
 
-// justDonwloadAndConvert(loginData)
-// undoMyWork(sandboxData)
-main(sandboxData)
+async function hardDelete(credentials) {
+  // do NOT use this function! Only for debugging in the sandbox database!
+  // This will delete ANY File without a .msg extension!
+
+  const connection = new jsforce.Connection({
+    loginUrl: credentials.url,
+  })
+
+  Object.entries(logNames).map(([_, value]) => {
+    fs.unlink(value, () => {})
+  })
+
+  await connection.login(credentials.user, credentials.pw + credentials.token)
+  const nonMsgQuery = oneLine`
+    SELECT Id
+    FROM ContentDocument
+    WHERE FileExtension != 'msg'
+  `
+  const msgQuery = oneLine`
+    SELECT Id, Title
+    FROM ContentDocument
+    WHERE FileExtension = 'msg' AND
+      Title LIKE 'backup_%'
+  `
+  const nonMsgFiles = await connection.queryAll(nonMsgQuery)
+    .then(result => result.records.map(value => value.Id))
+  const msgFiles = await connection.queryAll(msgQuery)
+    .then(result => {
+      result.records.map(record => {
+        record.Title = record.Title.slice(7)
+      })
+      return result.records
+    })
+
+  await connection.destroy('ContentDocument', nonMsgFiles)
+  await connection.update('ContentDocument', msgFiles)
+}
