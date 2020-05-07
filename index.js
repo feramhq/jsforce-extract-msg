@@ -4,6 +4,7 @@ const fs = require('fs')
 const fetch = require("node-fetch")
 const msg2txt = require('msg2txt')
 const path = require('path')
+const date = require('')
 
 module.exports = {
   main,
@@ -19,7 +20,7 @@ const logNames = {
   createLinkErrors: 'createLinkErrors.txt',
 }
 Object.entries(logNames).map(([key, value]) => {
-  logNames[key] = './logs/' + value
+  logNames[key] = `./logs_${new Date(Date.now())}/ + ${value}`
 })
 
 const filedir = './files'
