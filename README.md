@@ -21,4 +21,4 @@ module.exports = {
 }
 ```
 
-From there, start the script with `node index.js`
+From there, start the script with `node cli.js [ limit | nolimit ]`
