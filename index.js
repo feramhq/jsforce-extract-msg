@@ -4,7 +4,6 @@ const fs = require('fs')
 const fetch = require("node-fetch")
 const msg2txt = require('msg2txt')
 const path = require('path')
-const date = require('')
 
 module.exports = {
   main,
@@ -38,18 +37,18 @@ async function downloadDocument(connection, serverFilename, localFilename) {
     headers: headers,
   }
   return new Promise((resolve, reject) => {
-      fetch(connection.instanceUrl + serverFilename, options)
-        .then(result => {
-          if (!result.ok) {
-            reject(new Error(result.statusText))
-          }
-          result.body.pipe(fs.createWriteStream(localFilename))
+    fetch(connection.instanceUrl + serverFilename, options)
+      .then(result => {
+        if (!result.ok) {
+          reject(new Error(result.statusText))
+        }
+        result.body.pipe(fs.createWriteStream(localFilename))
           .on('close', () => resolve())
-        })
-        .catch(error => {
-          reject(error)
-        })
-    })
+      })
+      .catch(error => {
+        reject(error)
+      })
+  })
     .catch(error => {
       fs.appendFileSync(
         logNames.fetchErrors,
