@@ -19,8 +19,11 @@ const logNames = {
   uploadErrors: 'uploadErrors.txt',
   createLinkErrors: 'createLinkErrors.txt',
 }
+
+const timestamp = new Date()
+const logdir = `log_${timestamp.toISOString()}`
 Object.entries(logNames).map(([key, value]) => {
-  logNames[key] = `./logs_${new Date(Date.now())}/ + ${value}`
+  logNames[key] = `./${logdir}/${value}`
 })
 
 const filedir = './files'
@@ -252,9 +255,7 @@ async function main(credentials, fileLimit) {
     loginUrl: credentials.url,
   })
 
-  Object.entries(logNames).map(([key, value]) => {
-    fs.unlink(value, () => {})
-  })
+  fs.mkdirSync(logdir)
 
   fs.rmdirSync(filedir, {recursive: true})
   fs.mkdirSync(filedir)
