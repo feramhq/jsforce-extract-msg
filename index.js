@@ -308,6 +308,9 @@ async function main(credentials, fileLimit) {
           Description: description
         }
       )
+      console.info('deleting local files')
+      fs.unlinkSync(localFilename)
+      fs.rmdirSync(extractionDir, {recursive: true})
     }
     catch(error) {
       console.info('!!! error while creating documents')
